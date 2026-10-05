@@ -68,7 +68,11 @@ DEFAULT_BOUND_OVERFLOW_FACTORS = (1.0, 1.25, 1.5)
 
 
 def priority_overflow_ceiling(
-    bound: int | None, priority_admission: int, *, default_bound: bool
+    bound: int | None,
+    priority_admission: int,
+    *,
+    default_bound: bool,
+    authored: tuple[float | None, float | None] = (None, None),
 ) -> float | None:
     """The in-flight ceiling a forced priority overflow may not exceed, or ``None``.
 
@@ -76,6 +80,9 @@ def priority_overflow_ceiling(
         bound: The rung's effective bound (authored or the worker default).
         priority_admission: The caller's level (0 free, 1 paying, 2 Pro).
         default_bound: Whether ``bound`` is the worker's default lane bound.
+        authored: The rung's authored ``(priority_overflow_paying,
+            priority_overflow_pro)`` multiples; ``None`` keeps the default.
+            Ignored under the default bound (its factors protect the worker).
 
     Returns:
         ``bound * factor`` for a priority caller on a bounded rung, else
@@ -83,8 +90,14 @@ def priority_overflow_ceiling(
     """
     if bound is None or not priority_admission:
         return None
-    factors = DEFAULT_BOUND_OVERFLOW_FACTORS if default_bound else PRIORITY_OVERFLOW_FACTORS
-    return bound * factors[priority_admission]
+    if default_bound:
+        return bound * DEFAULT_BOUND_OVERFLOW_FACTORS[priority_admission]
+    paying, pro = (
+        PRIORITY_OVERFLOW_FACTORS[level] if value is None else value
+        for level, value in ((1, authored[0]), (2, authored[1]))
+    )
+    # Paying never overflows past Pro, even when only one side is authored.
+    return bound * (pro if priority_admission == 2 else min(paying, pro))
 
 
 def default_lane_bound(max_active_requests: int, share: float = DEFAULT_LANE_SHARE) -> int:

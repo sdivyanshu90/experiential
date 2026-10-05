@@ -205,3 +205,15 @@ def test_a_rate_window_shed_never_earns_the_priority_exception() -> None:
     assert overflow_target(soft, [(0, "rate_limit")], rate) == 0
     selected = soft.model_copy(update={"resolved_route_id": "route_" + "a" * 64})
     assert overflow_target(selected, [(0, "rate_limit")], rate) is None
+
+
+def test_authored_overflow_multiples_replace_the_default_per_level() -> None:
+    """A rung's authored paying / Pro multiples win; an unset one keeps the default."""
+    assert priority_overflow_ceiling(4, 2, default_bound=False, authored=(None, 2.0)) == 8.0
+    assert priority_overflow_ceiling(4, 1, default_bound=False, authored=(None, 2.0)) == 5.0
+    assert priority_overflow_ceiling(4, 1, default_bound=False, authored=(1.0, None)) == 4.0
+    assert priority_overflow_ceiling(4, 0, default_bound=False, authored=(2.0, 3.0)) is None
+    # Paying never passes Pro: Pro alone at 1.0 turns paying off too.
+    assert priority_overflow_ceiling(4, 1, default_bound=False, authored=(None, 1.0)) == 4.0
+    # The default bound ignores authored multiples (its factors protect the worker).
+    assert priority_overflow_ceiling(32, 2, default_bound=True, authored=(4.0, 4.0)) == 48.0
