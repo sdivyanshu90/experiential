@@ -42,7 +42,7 @@ It serves:
   unbillable rather than served for free)
 - `POST /v1/systemone` (TypeSafe native decisions: typed `noul`, `choice`, and `score`
   questions, buffered answers, provider-reported usage, and explicit decision capability and
-  pricing admission; no chat, streaming, continuation, or idempotency replay)
+  pricing admission; no chat, streaming, continuation, or idempotency replay); and `POST /v1/decisions`, its OpenAI Decisions API wire
 - `GET /health/live` and `GET /health/ready`
 - `GET /usage` and `GET /usage.json`
 
@@ -128,7 +128,7 @@ Reservations count repeated state and per-question protocol allowances, not the 
 They are bounded estimates, never provider-enforced token ceilings. Only reported usage settles.
 Only HTTP 400/401/403/404/422 release a known-rejection hold; 401 may use a certified fallback.
 HTTP 402/429/529, ambiguous transport, and malformed answers are terminal unknown outcomes, holds kept.
-At most eight deployments run once each: no redials, chat, streaming, replay, or chat guardrails.
+At most eight deployments run once each: no redials, chat, streaming, replay, or chat guardrails. `POST /v1/decisions`: see [OpenAI Decisions API](providers.md#openai-decisions-api).
 
 Multi-deployment certified pools execute natively. Admission returns the full
 ordered route plus the frozen retry-policy facts without starting an attempt;

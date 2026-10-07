@@ -1,8 +1,12 @@
-"""Authenticated, direct-route admission for native TypeSafe decisions.
+"""Admission for OpenAI-shaped ``POST /v1/decisions`` on the native data plane.
 
-Decisions are not chat: they bypass prompt-based selection,
-carry no continuation or replay identity, and permit at most one dispatch per
-certified deployment. Only provider-reported usage settles a paid attempt.
+The OpenAI Decisions API is a second wire of the decisions surface: the same
+authority, ledger surface (``decisions``), direct-route resolution, explicit
+input-only pricing rule and one-dispatch-per-deployment policy as the TypeSafe
+SystemOne wire in :mod:`exp.runtime.gateway.native_decisions`. Only the body
+shape and the qualifying rungs differ: a rung serves this wire when the catalog
+positively declares decisions support and the connection exposes OpenAI's own
+``/decisions`` endpoint (direct OpenAI only).
 """
 
 from __future__ import annotations
@@ -13,7 +17,6 @@ from dataclasses import replace
 from typing import Protocol
 
 from exp.common.core.artifacts import JsonObject
-from exp.common.models.catalog import GatewayTokenPrices
 from exp.runtime.gateway.client_apps import with_client_identity
 from exp.runtime.gateway.contracts import (
     AuthorizationSnapshot,
@@ -21,7 +24,6 @@ from exp.runtime.gateway.contracts import (
     GatewayFailure,
     GatewayFailureClass,
 )
-from exp.runtime.gateway.decisions_contracts import DecisionRequest, decode_decision_request
 from exp.runtime.gateway.guardrails.client import assert_not_internal_classification
 from exp.runtime.gateway.guardrails.enforcement import GuardrailEngine
 from exp.runtime.gateway.guardrails.native import require_unguarded_surface
@@ -33,6 +35,7 @@ from exp.runtime.gateway.native_accounting import (
 )
 from exp.runtime.gateway.native_admission import record_dead_admission_rungs
 from exp.runtime.gateway.native_components import NativeGatewayComponents, SyncWriteLedger
+from exp.runtime.gateway.native_decisions import NativeDecisionsMixin, _priced_decision_rung
 from exp.runtime.gateway.native_execution import (
     MAXIMUM_TOTAL_ATTEMPTS,
     InflightRequest,
@@ -42,12 +45,16 @@ from exp.runtime.gateway.native_execution import (
     select_route_deployments,
 )
 from exp.runtime.gateway.native_settlement import gateway_updating_failure, optional_text
+from exp.runtime.gateway.openai_decisions_contracts import (
+    OpenAIDecisionRequest,
+    decode_openai_decision_request,
+)
 from exp.runtime.gateway.routing import GatewayRoutingError
 from exp.runtime.models.providers.base import GatewayWireProfile
 from exp.runtime.openai_protocol.errors import OpenAIProtocolError, invalid_field
 
 
-class _DecisionsPlane(Protocol):
+class _OpenAIDecisionsPlane(Protocol):
     """Control-plane authority, accounting, and direct-route seams."""
 
     _components: NativeGatewayComponents
@@ -61,51 +68,43 @@ class _DecisionsPlane(Protocol):
         ...
 
 
-def not_a_decision_model_error(alias: str) -> OpenAIProtocolError:
-    """Return a field-specific refusal for an alias with no native decision rung."""
+def not_an_openai_decision_model_error(alias: str) -> OpenAIProtocolError:
+    """Return a field-specific refusal for an alias with no OpenAI decisions rung."""
     return OpenAIProtocolError(
         status_code=400,
         code="unsupported_capability",
         message=(
-            f"The model {alias!r} does not serve native decisions. Choose a decision model "
-            "from GET /v1/models and resend the request to /v1/systemone."
+            f"The model {alias!r} does not serve the OpenAI Decisions API. Choose a "
+            "decision model served by OpenAI from GET /v1/models and resend the request "
+            "to /v1/decisions."
         ),
         param="model",
     )
 
 
-def _decisions_rung(profile: GatewayWireProfile, supports_decisions: bool) -> bool:
-    """Require positive deployment evidence and the exact unsigned SystemOne wire."""
+def _openai_decisions_rung(profile: GatewayWireProfile, supports_decisions: bool) -> bool:
+    """Require positive decisions evidence and OpenAI's own unsigned endpoint."""
     return (
         supports_decisions is True
-        and profile.dialect == "typesafe_systemone"
-        and profile.decisions_url is not None
+        and profile.openai_decisions_url is not None
         and not profile.signs_request_body
     )
 
 
-def _priced_decision_rung(prices: GatewayTokenPrices) -> bool:
-    """Require a known nonnegative input rate and explicitly free output tokens."""
-    return (
-        prices.input_nano_usd_per_million_tokens is not None
-        and prices.input_nano_usd_per_million_tokens >= 0
-        and prices.output_nano_usd_per_million_tokens == 0
-    )
+class NativeOpenAIDecisionsMixin:
+    """The ``admit_openai_decisions`` boundary of the native control plane."""
 
-
-class NativeDecisionsMixin:
-    """The ``admit_decisions`` boundary of the native control plane."""
-
-    def admit_decisions(self: _DecisionsPlane, argument: str) -> str:
-        """Authenticate, decode, authorize, accept, and route one decision request.
+    def admit_openai_decisions(self: _OpenAIDecisionsPlane, argument: str) -> str:
+        """Authenticate, decode, authorize, accept, and route one OpenAI decision.
 
         Args:
             argument: JSON object with raw_key and body text. Caller idempotency
                 keys are ignored; no keyed replay contract is claimed.
 
         Returns:
-            Frozen route entries, original question definitions, and one-attempt
-            per-deployment limits, or a terminal content-free escalation.
+            Frozen route entries, the admitted question list, the ``openai``
+            wire marker, and one-attempt-per-deployment limits, or a terminal
+            content-free escalation.
 
         Raises:
             NativeBridgeError: Authentication, request validation, authorization,
@@ -120,15 +119,18 @@ class NativeDecisionsMixin:
         except Exception as exc:  # noqa: BLE001 - sanitize the authority boundary.
             raise authority_error(exc) from exc
         try:
-            decoded = decode_decision_request(str(data["body"]))
+            decoded = decode_openai_decision_request(str(data["body"]))
         except (ValueError, TypeError, RecursionError) as exc:
-            # Pydantic and JSON errors may include state, instructions, or key
-            # names. Never copy their text into a public error or ledger row.
+            # Validation text may quote input, instructions, or names; never copy
+            # it into a public error or a ledger row.
             raise NativeBridgeError(
                 invalid_field(
                     "body",
-                    "Invalid decision request. Send only model, state, and bounded typed "
-                    "questions; chat, streaming, tools, and generation controls are not supported.",
+                    "Invalid decision request. Send model, input (text or user messages with "
+                    "input_text and inline base64 input_image parts), questions of type "
+                    "predicate, choice (with choices), or score (with levels), each with "
+                    "instructions and an optional unique name, and optionally "
+                    "safety_identifier. Streaming and chat controls are not supported.",
                 )
             ) from exc
         deadline = time.monotonic() + self._request_timeout_seconds
@@ -167,20 +169,20 @@ class NativeDecisionsMixin:
 
 
 def _admit_accepted(
-    plane: _DecisionsPlane,
+    plane: _OpenAIDecisionsPlane,
     authorization: AuthorizationSnapshot,
-    request: DecisionRequest,
+    request: OpenAIDecisionRequest,
     deadline: float,
 ) -> str:
-    """Package only certified, available, explicitly priced decision deployments."""
+    """Package only certified, available, explicitly priced OpenAI decision rungs."""
     if not isinstance(authorization.target, DirectTarget):
         _finish_unsupported(plane, authorization)
-        raise NativeBridgeError(not_a_decision_model_error(authorization.alias))
+        raise NativeBridgeError(not_an_openai_decision_model_error(authorization.alias))
     try:
         route = plane._components.routes.resolve_direct(authorization)  # noqa: SLF001
         dispatchable = dispatchable_route_profiles(
-            plane._components.runtime_catalogs,
-            route,  # noqa: SLF001
+            plane._components.runtime_catalogs,  # noqa: SLF001
+            route,
         )
     except NativeDialectUnavailableError as exc:
         return plane._escalate_accepted(authorization, str(exc))  # noqa: SLF001
@@ -204,13 +206,13 @@ def _admit_accepted(
         for index, (profile, _client) in zip(
             dispatchable.indexes, dispatchable.resolved_wires, strict=True
         )
-        if _decisions_rung(
+        if _openai_decisions_rung(
             profile, route.deployments[index].gateway.capabilities.supports_decisions
         )
     )
     if not capable:
         _finish_unsupported(plane, authorization)
-        raise NativeBridgeError(not_a_decision_model_error(authorization.alias))
+        raise NativeBridgeError(not_an_openai_decision_model_error(authorization.alias))
     serving = tuple(
         index for index in capable if _priced_decision_rung(route.deployments[index].gateway.prices)
     )[:MAXIMUM_TOTAL_ATTEMPTS]
@@ -236,9 +238,9 @@ def _admit_accepted(
     route = select_route_deployments(route, serving)
     wire_route: list[JsonObject] = []
     for deployment, (profile, _client) in zip(route.deployments, served_wires, strict=True):
-        decisions_url = profile.decisions_url
+        decisions_url = profile.openai_decisions_url
         if decisions_url is None:  # pragma: no cover - filtered above.
-            raise GatewayRoutingError("decision rung lost its wire endpoint")
+            raise GatewayRoutingError("OpenAI decision rung lost its wire endpoint")
         wire_route.append(
             deployment_wire_entry(
                 route,
@@ -255,11 +257,8 @@ def _admit_accepted(
         "exact_model_id": route.snapshot.exact_model_id,
         "route_reason": route.route_reason,
         "route": wire_route,
-        "wire": "systemone",
-        "questions": {
-            name: question.model_dump(mode="json", exclude_none=True)
-            for name, question in request.questions.items()
-        },
+        "wire": "openai",
+        "openai_questions": request.question_definitions(),
         "maximum_total_attempts": depth,
         "maximum_same_deployment_attempts": 1,
     }
@@ -280,12 +279,16 @@ def _admit_accepted(
     return serialized
 
 
-def _finish_unsupported(plane: _DecisionsPlane, authorization: AuthorizationSnapshot) -> None:
-    """Finish an accepted request naming an alias that cannot serve decisions."""
+def _finish_unsupported(plane: _OpenAIDecisionsPlane, authorization: AuthorizationSnapshot) -> None:
+    """Finish an accepted request naming an alias that cannot serve OpenAI decisions."""
     plane._accounting.finish_request_quietly(  # noqa: SLF001
         authorization,
         GatewayFailure(
             failure_class=GatewayFailureClass.UNSUPPORTED_CAPABILITY,
-            safe_message="the model alias does not serve native decisions",
+            safe_message="the model alias does not serve the OpenAI Decisions API",
         ),
     )
+
+
+class NativeDecisionSurfacesMixin(NativeDecisionsMixin, NativeOpenAIDecisionsMixin):
+    """Both decisions wires' admission boundaries: SystemOne and OpenAI."""

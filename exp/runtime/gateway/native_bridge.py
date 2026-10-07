@@ -80,7 +80,6 @@ from exp.runtime.gateway.native_continuation import (
     select_bound_continuation_route as _select_bound_continuation_route,
 )
 from exp.runtime.gateway.native_count_tokens import NativeCountTokensMixin
-from exp.runtime.gateway.native_decisions import NativeDecisionsMixin
 from exp.runtime.gateway.native_decode_boundary import NativeDecodeMixin
 from exp.runtime.gateway.native_dispatch_signing import NativeDispatchSigningMixin
 from exp.runtime.gateway.native_effects import admission_without_effects
@@ -100,6 +99,7 @@ from exp.runtime.gateway.native_explicit_cache import (
 )
 from exp.runtime.gateway.native_images import NativeImagesMixin
 from exp.runtime.gateway.native_observability import NativeObservabilityMixin
+from exp.runtime.gateway.native_openai_decisions import NativeDecisionSurfacesMixin
 from exp.runtime.gateway.native_reasoning import (
     authenticate_reasoning_history,
     has_active_reasoning_content,
@@ -164,7 +164,7 @@ class NativeControlPlane(
     NativeDispatchSigningMixin,
     NativeToolSearchMixin,
     NativeCountTokensMixin,
-    NativeDecisionsMixin,
+    NativeDecisionSurfacesMixin,
     NativeEmbeddingsMixin,
     NativeImagesMixin,
     NativeObservabilityMixin,
