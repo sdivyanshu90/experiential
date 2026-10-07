@@ -1448,7 +1448,11 @@ class TestLaneSaturation:
         failure = cast("JsonObject", refused["failure"])
         assert failure["failure_class"] == "throttled"
         assert failure["retry_after_seconds"] == 5
-        assert "at capacity right now" in str(failure["safe_message"])
+        # A free caller (the fixture's level 0) hears about Pro priority.
+        assert failure["safe_message"] == (
+            "This model is at capacity right now. Please retry in a few seconds. "
+            "Pro subscribers get priority access when models are busy."
+        )
         assert len(ledger.started) == 1
         assert registry.rung_admission_counters() == (1, 0, 1)
         # The refused request is finished, so the slot it never took frees nothing
