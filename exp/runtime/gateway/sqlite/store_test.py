@@ -1275,6 +1275,15 @@ def test_disabled_provider_connection_can_be_added_again(tmp_path: Path) -> None
     )
     assert store.disable_provider_connection(organization_id="org-one", connection_id="primary")
 
+    with pytest.raises(ProviderAuthorityError, match="different immutable revision"):
+        store.upsert_provider_connection(
+            organization_id="org-one",
+            connection_id="primary",
+            revision_id="mismatched-revision",
+            config=original,
+        )
+    assert store.provider_connections(organization_id="org-one") == ()
+
     changed, restored = store.upsert_provider_connection(
         organization_id="org-one",
         connection_id="primary",
